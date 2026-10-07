@@ -1,8 +1,14 @@
-"""Проверки UI-эскиза: рисуем окно в offscreen и смотрим геометрию."""
+"""Проверки главного окна на живом AppContext с фейковым сервером.
+
+Всё, что умеет окно, гоняем в offscreen: списки, навигация, действия (они идут
+через TaskRunner(inline=True) — синхронно, чтобы тест видел результат сразу),
+геометрия пузырей, реакции на обновление данных.
+"""
 
 from __future__ import annotations
 
 import os
+from functools import partial
 
 import pytest
 from PySide6.QtCore import QRect
@@ -10,10 +16,16 @@ from PySide6.QtWidgets import QApplication, QFrame
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from chat_multi_cli.models import Message
+from chat_multi_cli.services import AppContext
+from chat_multi_cli.storage.writer import upsert_message
 from chat_multi_cli.ui.chat_view import MessageBubble, SystemBubble
 from chat_multi_cli.ui.main_window import MainWindow
 from chat_multi_cli.ui.style import QSS
+from chat_multi_cli.ui.tasks import TaskRunner
 from chat_multi_cli.ui.ticket_list import INCOMING_ROLE, TICKET_ROLE
+from tests.conftest import message_payload
+from tests.fake_server import FakeServer
 
 
 @pytest.fixture(scope="module")
@@ -25,8 +37,8 @@ def app() -> QApplication:
 
 
 @pytest.fixture
-def window(app: QApplication) -> MainWindow:
-    win = MainWindow()
+def window(app: QApplication, app_ctx: AppContext) -> MainWindow:
+    win = MainWindow(app_ctx, tasks=TaskRunner(inline=True))
     win.show()
     app.processEvents()
     yield win
@@ -65,15 +77,17 @@ def test_closed_tickets_are_last(window: MainWindow) -> None:
     assert "in_progress" not in statuses[first_closed:]
 
 
-def test_opening_ticket_switches_page(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
+def test_opening_ticket_marks_read(window: MainWindow) -> None:
+    assert window.ctx.repo.unread_count("t1") == 1
+    window._open_ticket("t1")
     assert window.stack.currentWidget() is window.chat_page
     assert window.chat.ticket is not None
-    assert window.chat.ticket.id == "t_9f2c"
+    assert window.chat.ticket.id == "t1"
+    assert window.ctx.repo.unread_count("t1") == 0
 
 
 def test_own_messages_right_client_messages_left(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
+    window._open_ticket("t1")
     QApplication.processEvents()
     host_width = window.chat.bubble_host.width()
     assert host_width > 300
@@ -84,36 +98,36 @@ def test_own_messages_right_client_messages_left(window: MainWindow) -> None:
     assert max(x_positions) > host_width * 0.25, "свои сообщения должны быть справа"
 
 
-def test_system_message_is_not_a_plain_bubble(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
+def test_system_message_is_a_system_bubble(window: MainWindow) -> None:
+    window._open_ticket("t1")
     QApplication.processEvents()
     assert len(window.chat.findChildren(SystemBubble)) == 1
 
 
 def test_accept_moves_ticket_into_list(window: MainWindow) -> None:
     before_incoming = len(window.incoming)
-    window._accept("t_in_1")
+    window._accept("t2")
 
     assert len(window.incoming) == before_incoming - 1
     assert window.stack.currentWidget() is window.chat_page
     assert window.chat.ticket is not None
     assert window.chat.ticket.status == "in_progress"
-    assert window.chat.ticket.id == "t_in_1"
+    assert window.chat.ticket.id == "t2"
 
 
 def test_send_appends_own_message(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
-    count = len(window.chat.ticket.messages)
+    window._open_ticket("t1")
+    count = len(window.chat.messages)
     window._send("Проверка связи")
 
-    assert len(window.chat.ticket.messages) == count + 1
-    last = window.chat.ticket.messages[-1]
+    assert len(window.chat.messages) == count + 1
+    last = window.chat.messages[-1]
     assert last.sender == "master"
-    assert last.delivery == "sending"
+    assert last.text == "Проверка связи"
 
 
 def test_close_ticket_locks_composer(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
+    window._open_ticket("t1")
     window._close_ticket()
 
     composer = window.chat.composer
@@ -123,7 +137,7 @@ def test_close_ticket_locks_composer(window: MainWindow) -> None:
 
 
 def test_reopen_ticket_unlocks_composer(window: MainWindow) -> None:
-    window._open_ticket("t_1c88")
+    window._open_ticket("t3")
     assert window.chat.composer.input.isEnabled() is False
 
     window._reopen_ticket()
@@ -132,39 +146,55 @@ def test_reopen_ticket_unlocks_composer(window: MainWindow) -> None:
 
 
 def test_add_and_remove_master(window: MainWindow) -> None:
+    window._open_ticket("t1")
     before = len(window.masters)
-    window._pick_master_from(("m_08",))
+    window._connect_master("m2")
     assert len(window.masters) == before + 1
-    assert "Антон Волков" in {name for _, name in window.masters}
+    assert "Пётр Кузнецов" in {name for _, name in window.masters}
 
-    window._remove_master("m_08")
-    assert "Антон Волков" not in {name for _, name in window.masters}
+    window._remove_master("m2")
+    assert "Пётр Кузнецов" not in {name for _, name in window.masters}
 
 
-def test_rebuild_keeps_chat_open(window: MainWindow) -> None:
-    window._open_ticket("t_9f2c")
-    window.panel.rebuild()
+def test_reload_keeps_chat_open(window: MainWindow) -> None:
+    window._open_ticket("t1")
+    window._on_batch(None)
     QApplication.processEvents()
     assert window.stack.currentWidget() is window.chat_page
-    assert window.panel.current_ticket_id() == "t_9f2c"
+    assert window.panel.current_ticket_id() == "t1"
+    assert window.chat.ticket.id == "t1"
 
 
-def test_timer_refresh_does_not_change_page(window: MainWindow) -> None:
-    window._open_ticket("t_3a71")
-    window._refresh()
+def test_incoming_message_appears_after_reload(
+    window: MainWindow, fake_server: FakeServer
+) -> None:
+    window._open_ticket("t1")
+    assert len(window.chat.messages) == 3
+
+    fake_server.add_message(
+        "t1",
+        message_payload("m-new", seq=4, ticket_id="t1", sender="client", text="Вечером ждём"),
+    )
+    # Воркер применил бы событие message.created так же: запись в кэш + сигнал.
+    payload = fake_server.messages["t1"][-1]
+    window.ctx.writer.run_sync(partial(upsert_message, message=Message.from_payload(payload)))
+    window._on_batch(None)
     QApplication.processEvents()
-    assert window.stack.currentWidget() is window.chat_page
-    assert window.panel.current_ticket_id() == "t_3a71"
+
+    assert len(window.chat.messages) == 4
+    assert window.chat.messages[-1].text == "Вечером ждём"
+    assert window.ctx.repo.unread_count("t1") == 1
+    assert window.tickets[0].unread_count == 1
 
 
 def test_search_filters_rows(window: MainWindow) -> None:
-    window.panel.search.setText("баккер")
+    window.panel.search.setText("стук")
     QApplication.processEvents()
     subjects = [
         window.panel.list.item(row).data(TICKET_ROLE).subject
         for row in range(1, window.panel.list.count())
     ]
-    assert subjects == ["Левый баккер, горит на асфальте"]
+    assert subjects == ["Стук при повороте"]
 
     window.panel.search.setText("")
     QApplication.processEvents()

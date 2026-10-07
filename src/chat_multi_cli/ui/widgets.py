@@ -49,5 +49,8 @@ class StatusDot(QLabel):
         self.setObjectName("statusDot")
         self.set_color(color or QColor("#2e9e5b"))
 
+    def set_text(self, text: str) -> None:
+        self.setText(f"● {text}")
+
     def set_color(self, color: QColor) -> None:
         self.setStyleSheet(f"color: {color.name()};")

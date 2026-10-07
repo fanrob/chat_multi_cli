@@ -17,8 +17,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from chat_multi_cli.models import TicketBrief
 from chat_multi_cli.ui import theme
-from chat_multi_cli.ui.mock import INCOMING_TITLE, MockTicket
+from chat_multi_cli.ui.viewmodels import INCOMING_TITLE, client_name, format_time
 
 INCOMING_ROLE = Qt.ItemDataRole.UserRole + 1
 TICKET_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -48,7 +49,7 @@ class TicketDelegate(QStyledItemDelegate):
             self._paint_incoming(painter, option, index, incoming)
             return
 
-        ticket: MockTicket | None = index.data(TICKET_ROLE)
+        ticket: TicketBrief | None = index.data(TICKET_ROLE)
         if ticket is None:
             return
         self._paint_ticket(painter, option, index, ticket)
@@ -107,7 +108,7 @@ class TicketDelegate(QStyledItemDelegate):
         painter: QPainter,
         option: QStyleOptionViewItem,
         index: IndexT,
-        ticket: MockTicket,
+        ticket: TicketBrief,
     ) -> None:
         rect = option.rect.adjusted(6, 2, -6, -2)
         selected = _is_selected(option)
@@ -127,7 +128,7 @@ class TicketDelegate(QStyledItemDelegate):
         title_color = theme.TEXT_DISABLED if muted else theme.TEXT
         meta_color = theme.TEXT_DISABLED if muted else theme.TEXT_MUTED
 
-        if ticket.unread and not muted:
+        if ticket.unread_count and not muted:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(theme.ACCENT)
             painter.drawEllipse(rect.left() + 10, rect.top() + 18, 6, 6)
@@ -141,13 +142,14 @@ class TicketDelegate(QStyledItemDelegate):
             _elide(painter, subject_rect, ticket.subject),
         )
 
+        time = format_time(ticket.updated_at)
         painter.setFont(_font(9))
         painter.setPen(meta_color)
         meta_rect = rect.adjusted(24, 0, -70, -28)
         painter.drawText(
             meta_rect,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom),
-            _elide(painter, meta_rect, f"{ticket.client_name} · {ticket.time_label}"),
+            _elide(painter, meta_rect, f"{client_name(ticket)} · {time}"),
         )
 
         painter.setFont(_font(9, bold=True))
@@ -155,7 +157,7 @@ class TicketDelegate(QStyledItemDelegate):
         painter.drawText(
             rect.adjusted(-64, 10, -12, 0),
             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop),
-            ticket.updated,
+            time,
         )
 
         if muted:
@@ -195,7 +197,11 @@ class TicketListPanel(QWidget):
     incoming_selected = Signal()
     navigation_changed = Signal(object, bool)
 
-    def __init__(self, tickets: list[MockTicket], incoming: list[MockTicket]) -> None:
+    def __init__(
+        self,
+        tickets: list[TicketBrief],
+        incoming: list[TicketBrief],
+    ) -> None:
         super().__init__()
         self.tickets = tickets
         self.incoming = incoming
@@ -259,7 +265,7 @@ class TicketListPanel(QWidget):
         for ticket in ordered:
             item = QListWidgetItem()
             item.setData(TICKET_ROLE, ticket)
-            item.setToolTip(f"{ticket.subject}\n{ticket.client_name}")
+            item.setToolTip(f"{ticket.subject}\n{client_name(ticket)}")
             self.list.addItem(item)
 
         self.list.blockSignals(False)
@@ -274,16 +280,22 @@ class TicketListPanel(QWidget):
             return
         self.navigation_changed.emit(self.current_ticket_id(), self.is_incoming_selected())
 
-    def _sorted(self) -> list[MockTicket]:
-        query = self.search.text().strip().lower()
+    def set_data(self, tickets: list[TicketBrief], incoming: list[TicketBrief]) -> None:
+        """Обновить оба списка и перерисовать панель."""
+        self.tickets = tickets
+        self.incoming = incoming
+        self.rebuild()
+
+    def _sorted(self) -> list[TicketBrief]:
+        query = self.search.text().strip().casefold()
         pool = self.tickets
         if query:
             pool = [
                 t
                 for t in pool
-                if query in t.subject.lower()
-                or query in t.client_name.lower()
-                or query in t.id.lower()
+                if query in t.subject.casefold()
+                or query in client_name(t).casefold()
+                or query in t.id.casefold()
             ]
         return [t for t in pool if not t.is_closed] + [t for t in pool if t.is_closed]
 

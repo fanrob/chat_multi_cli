@@ -13,17 +13,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from chat_multi_cli.ui.mock import MockTicket
+from chat_multi_cli.models import TicketBrief
+from chat_multi_cli.ui.viewmodels import INCOMING_TITLE, client_name, format_time
 from chat_multi_cli.ui.widgets import Placeholder
 
 
 class IncomingCard(QFrame):
-    """Карточка непринятой заявки с превью сообщений клиента."""
+    """Карточка непринятой заявки с превью последнего сообщения клиента."""
 
     accept_requested = Signal(str)
     decline_requested = Signal(str)
 
-    def __init__(self, ticket: MockTicket) -> None:
+    def __init__(self, ticket: TicketBrief) -> None:
         super().__init__()
         self.ticket = ticket
         self.setObjectName("incomingCard")
@@ -40,12 +41,13 @@ class IncomingCard(QFrame):
         top.addWidget(title)
         top.addStretch(1)
 
-        time_label = QLabel(ticket.updated)
+        time_label = QLabel(format_time(ticket.updated_at))
         time_label.setObjectName("cardTime")
         top.addWidget(time_label)
         layout.addLayout(top)
 
-        meta = QLabel(f"{ticket.client_name} · {ticket.workshop}")
+        workshop = ticket.workshop_name or ""
+        meta = QLabel(f"{client_name(ticket)} · {workshop}" if workshop else client_name(ticket))
         meta.setObjectName("cardMeta")
         layout.addWidget(meta)
 
@@ -70,8 +72,8 @@ class IncomingCard(QFrame):
 
         buttons.addStretch(1)
 
-        if ticket.unread:
-            unread = QLabel(f"{ticket.unread} новых")
+        if ticket.unread_count:
+            unread = QLabel(f"{ticket.unread_count} новых")
             unread.setObjectName("cardUnread")
             buttons.addWidget(unread)
 
@@ -97,7 +99,7 @@ class IncomingView(QWidget):
         header_layout.setContentsMargins(20, 14, 20, 16)
         header_layout.setSpacing(4)
 
-        title = QLabel("Входящие заявки")
+        title = QLabel(INCOMING_TITLE)
         title.setObjectName("chatSubject")
         header_layout.addWidget(title)
 
@@ -121,7 +123,11 @@ class IncomingView(QWidget):
         self.scroll_area.setWidget(self.placeholder)
         self._cards_host: QWidget | None = None
 
-    def set_tickets(self, tickets: list[MockTicket]) -> None:
+    def set_tickets(self, tickets: list[TicketBrief]) -> None:
+        """Перерисовывает список. takeWidget снимает старый виджет, не удаляя
+        его: QScrollArea.setWidget сам уничтожил бы предыдущий (и наш
+        placeholder при повторном показе стал бы висящим C++-объектом)."""
+        self.scroll_area.takeWidget()
         if self._cards_host is not None:
             self._cards_host.deleteLater()
             self._cards_host = None
@@ -160,12 +166,8 @@ class IncomingView(QWidget):
         return self._cards_host.findChildren(IncomingCard)
 
 
-def _preview(ticket: MockTicket) -> str:
-    if not ticket.messages:
+def _preview(ticket: TicketBrief) -> str:
+    last = ticket.last_message
+    if last is None or not last.preview:
         return "Нет сообщений"
-    first = ticket.messages[0].text
-    if ticket.messages[0].attachments:
-        first += f"  [{len(ticket.messages[0].attachments)} вложение]"
-    if len(ticket.messages) > 1:
-        first += f"  …  ещё {len(ticket.messages) - 1}"
-    return first
+    return last.preview

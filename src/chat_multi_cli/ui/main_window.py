@@ -1,9 +1,15 @@
-"""Главное окно: панель заявок слева, чат/входящие справа."""
+"""Главное окно: панель заявок слева, чат/входящие справа.
+
+Вся сеть и БД — за AppContext (services.py): окно только читает кэш и шлёт
+действия. События ленты приходят колбэками SyncWorker через SyncBridge и
+перерисовывают списки; действия выполняются TaskRunner'ом в фоне, чтобы
+окно не висло на сетевом запросе.
+"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -14,36 +20,35 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
-from chat_multi_cli.ui import mock, theme
+from chat_multi_cli.models import Message, Ticket, TicketBrief
+from chat_multi_cli.services import AppContext
+from chat_multi_cli.ui import theme
 from chat_multi_cli.ui.chat_view import ChatPage, ChatView
 from chat_multi_cli.ui.incoming_view import IncomingView
 from chat_multi_cli.ui.master_picker import MasterPicker
+from chat_multi_cli.ui.tasks import SyncBridge, TaskRunner
 from chat_multi_cli.ui.ticket_list import TicketListPanel
+from chat_multi_cli.ui.viewmodels import member_pairs
 from chat_multi_cli.ui.widgets import Placeholder, StatusDot
-
-REFRESH_INTERVAL_MS = 20_000
-
-MOCK_MASTERS = [
-    ("m_17", "Фёдор Семёнов"),
-    ("m_42", "Пётр Кузнецов"),
-    ("m_08", "Антон Волков"),
-    ("m_55", "Игорь Мельник"),
-    ("m_63", "Дмитрий Орлов"),
-]
-
-MASTER_NAMES = dict(MOCK_MASTERS)
-SELF_MASTER_ID = "m_17"
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, ctx: AppContext, *, tasks: TaskRunner | None = None) -> None:
         super().__init__()
+        self.ctx = ctx
+        self.tasks = tasks or TaskRunner()
+        self.bridge = SyncBridge()
+        ctx.worker.on_events(self.bridge.on_batch)
+        ctx.worker.on_status(self.bridge.on_status)
+        self.bridge.batch_applied.connect(self._on_batch)
+        self.bridge.status_changed.connect(self._on_status)
+
         self.setWindowTitle("Заявки — мессенджер мастера")
         self.resize(1180, 760)
 
-        self.tickets: list[mock.MockTicket] = list(mock.MOCK_TICKETS)
-        self.incoming: list[mock.MockTicket] = list(mock.MOCK_INCOMING)
-        self.masters: list[tuple[str, str]] = [MOCK_MASTERS[0], MOCK_MASTERS[1]]
+        self.tickets: list[TicketBrief] = []
+        self.incoming: list[TicketBrief] = []
+        self.masters: list[tuple[str, str]] = []
 
         self.panel = TicketListPanel(self.tickets, self.incoming)
         self.panel.ticket_selected.connect(self._open_ticket)
@@ -87,97 +92,187 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         status.setObjectName("appStatusBar")
         self.setStatusBar(status)
-        status.addWidget(QLabel("Эскиз UI · данные хардкод · сети нет"))
-        status.addPermanentWidget(StatusDot("на связи"))
+        profile = ctx.profile
+        identity = profile.full_name if profile else "—"
+        status.addWidget(QLabel(f"{identity} · {ctx.config.base_url}"))
+        self.dot = StatusDot("подключение…", QColor("#b3b9c2"))
+        status.addPermanentWidget(self.dot)
 
         self.refresh_timer = QTimer(self)
-        self.refresh_timer.setInterval(REFRESH_INTERVAL_MS)
-        self.refresh_timer.timeout.connect(self._refresh)
+        self.refresh_timer.setInterval(ctx.config.refresh_seconds * 1000)
+        self.refresh_timer.timeout.connect(self._reload)
         self.refresh_timer.start()
 
+        self._reload()
         self.panel.select_incoming()
         self._open_incoming()
 
     # --- навигация ---
+
     def _open_incoming(self) -> None:
         self.incoming_view.set_tickets(self.incoming)
         self.stack.setCurrentWidget(self.incoming_view)
 
     def _open_ticket(self, ticket_id: str) -> None:
-        ticket = self._find(ticket_id)
+        ticket = self.ctx.ticket(ticket_id)
         if ticket is None:
             return
-        self.panel.select_ticket(ticket_id)
-        self.chat.show_ticket(ticket)
-        self.chat_page.set_masters(self.masters)
-        self.stack.setCurrentWidget(self.chat_page)
-        if ticket.unread:
-            ticket.unread = 0
-            self.panel.rebuild()
+        self._show_ticket(ticket)
+        self._mark_unread(ticket)
 
-    # --- действия: пока без сервера, меняем только моки ---
+    def _show_ticket(self, ticket: Ticket) -> None:
+        self.panel.select_ticket(ticket.id)
+        messages = self.ctx.messages(ticket.id)
+        self.masters = member_pairs(ticket)
+        self.chat_page.set_masters(self.masters)
+        self.chat.show_ticket(ticket, messages)
+        self.stack.setCurrentWidget(self.chat_page)
+
+    # --- синхронизация ---
+
+    def _on_batch(self, _batch: object) -> None:
+        """Пачка событий ленты применена — перерисовать всё из кэша."""
+        self._reload()
+
+    def _on_status(self, status: object) -> None:
+        online = bool(getattr(status, "online", True))
+        text = getattr(status, "text", "на связи")
+        self.dot.set_color(QColor("#2e9e5b") if online else QColor("#d64545"))
+        self.dot.set_text(text)
+
+    def _reload(self) -> None:
+        open_id = self.chat.ticket.id if self.chat.ticket else None
+        self.tickets = self.ctx.panel_tickets()
+        self.incoming = self.ctx.feed()
+        self.panel.set_data(self.tickets, self.incoming)
+        self.incoming_view.set_tickets(self.incoming)
+        if open_id is not None:
+            self._refresh_open_chat(open_id)
+
+    def _refresh_open_chat(self, ticket_id: str) -> None:
+        ticket = self.ctx.ticket(ticket_id)
+        if ticket is None:
+            return
+        messages = self.ctx.messages(ticket_id)
+        keep_position = not self.chat.at_bottom()
+        self.masters = member_pairs(ticket)
+        self.chat_page.set_masters(self.masters)
+        self.chat.show_ticket(ticket, messages, scroll_to_bottom=keep_position)
+
+    # --- действия: API в фоне, UI обновляется по готовности ---
+
     def _send(self, text: str) -> None:
-        names = self.chat.composer.attachments.names
-        self.chat.append_local_message(text, names)
+        ticket = self.chat.ticket
+        if ticket is None:
+            return
+        paths = self.chat.composer.attachments.paths
         self.chat.composer.attachments.set_files([])
-        self.panel.rebuild()
+
+        def action() -> Message:
+            return self.ctx.send(ticket.id, text, paths)
+
+        def done(message: Message) -> None:
+            self.chat.append_message(message)
+            self._reload()
+
+        def error(exc: BaseException) -> None:
+            QMessageBox.warning(self, "Не отправлено", str(exc))
+            self.chat.composer.input.setPlainText(text)
+
+        self.tasks.submit(action, on_done=done, on_error=error)
 
     def _accept(self, ticket_id: str) -> None:
-        ticket = next((t for t in self.incoming if t.id == ticket_id), None)
-        if ticket is None:
-            return
-        self.incoming = [t for t in self.incoming if t.id != ticket_id]
-        ticket.status = "in_progress"
-        ticket.unread = 0
-        self.tickets = [ticket, *self.tickets]
-        self.panel.rebuild()
-        self.incoming_view.set_tickets(self.incoming)
-        self._open_ticket(ticket_id)
+        self.tasks.submit(
+            lambda: self.ctx.accept(ticket_id),
+            on_done=lambda _result: self._open_after_action(ticket_id),
+            on_error=self._action_error,
+        )
 
     def _decline(self, ticket_id: str) -> None:
-        self.incoming = [t for t in self.incoming if t.id != ticket_id]
-        self.incoming_view.set_tickets(self.incoming)
-        self.panel.rebuild()
+        self.tasks.submit(
+            lambda: self.ctx.decline(ticket_id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
+        )
 
     def _close_ticket(self) -> None:
         ticket = self.chat.ticket
         if ticket is None or ticket.is_closed:
             return
-        ticket.status = "closed"
-        self.chat.append_system_message("Заявка закрыта мастером Фёдор Семёнов")
-        self.chat.show_ticket(ticket)
-        self.panel.rebuild()
+        self.tasks.submit(
+            lambda: self.ctx.close(ticket.id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
+        )
 
     def _reopen_ticket(self) -> None:
         ticket = self.chat.ticket
         if ticket is None:
             return
-        ticket.status = "in_progress"
-        self.chat.append_system_message("Заявка открыта заново")
-        self.chat.show_ticket(ticket)
-        self.panel.rebuild()
+        self.tasks.submit(
+            lambda: self.ctx.reopen(ticket.id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
+        )
+
+    def _more_actions(self) -> None:
+        ticket = self.chat.ticket
+        if ticket is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Действия с заявкой")
+        box.setText(ticket.subject)
+        release_button = box.addButton("Вернуть в ленту", QMessageBox.ButtonRole.ActionRole)
+        read_button = box.addButton(
+            "Отметить прочитанным", QMessageBox.ButtonRole.ActionRole
+        )
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is release_button:
+            self.tasks.submit(
+                lambda: self.ctx.release(ticket.id),
+                on_done=lambda _result: self._reload(),
+                on_error=self._action_error,
+            )
+        elif clicked is read_button:
+            self.tasks.submit(
+                lambda: self.ctx.mark_read(ticket.id),
+                on_done=lambda _result: self._reload(),
+                on_error=self._action_error,
+            )
 
     def _pick_master(self) -> None:
-        dialog = MasterPicker(MOCK_MASTERS, self.masters, self)
+        directory = self.ctx.master_pairs()
+        if not directory:
+            QMessageBox.information(
+                self, "Мастера", "Справочник мастеров пуст — подключать некого."
+            )
+            return
+        dialog = MasterPicker(directory, self.masters, self)
         if dialog.exec() != MasterPicker.DialogCode.Accepted:
             return
-        self._pick_master_from((dialog.selected_id(),))
+        self._connect_master(dialog.selected_id())
 
-    def _pick_master_from(self, master_ids: tuple[str | None, ...]) -> None:
-        """Подключает мастера без диалога — используется и в тестах."""
-        for chosen in master_ids:
-            if not chosen or chosen in {mid for mid, _ in self.masters}:
-                continue
-            name = MASTER_NAMES[chosen]
-            self.masters.append((chosen, name))
-            self.chat_page.set_masters(self.masters)
-            self.chat.append_system_message(f"К заявке подключился мастер {name}")
+    def _connect_master(self, master_id: str | None) -> None:
+        ticket = self.chat.ticket
+        if ticket is None or not master_id:
+            return
+        self.tasks.submit(
+            lambda: self.ctx.add_member(ticket.id, master_id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
+        )
 
     def _remove_master(self, master_id: str) -> None:
-        name = MASTER_NAMES.get(master_id, "Мастер")
-        self.masters = [(mid, n) for mid, n in self.masters if mid != master_id]
-        self.chat_page.set_masters(self.masters)
-        self.chat.append_system_message(f"{name} отключён от заявки")
+        ticket = self.chat.ticket
+        if ticket is None:
+            return
+        self.tasks.submit(
+            lambda: self.ctx.remove_member(ticket.id, master_id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
+        )
 
     def _attach(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -189,34 +284,33 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         strip = self.chat.composer.attachments
-        strip.set_files(strip.names + [_basename(p) for p in paths])
+        strip.set_files(strip.paths + list(paths))
 
-    def _more_actions(self) -> None:
-        QMessageBox.information(
-            self,
-            "Ещё",
-            "Заглушка меню действий:\n"
-            "• вернуть заявку в общую ленту\n"
-            "• отметить прочитанным\n"
-            "• переслать другому мастеру\n"
-            "• экспорт истории",
+    # --- прочее ---
+
+    def _mark_unread(self, ticket: Ticket) -> None:
+        """Гасим бейдж непрочитанных: считаем по кэшу, а не по полю карточки
+        (в полной карточке unread_count всегда 0 — его собирает только список)."""
+        unread = self.ctx.repo.unread_count(ticket.id)
+        if not unread:
+            return
+        self.tasks.submit(
+            lambda: self.ctx.mark_read(ticket.id),
+            on_done=lambda _result: self._reload(),
+            on_error=self._action_error,
         )
 
-    # --- имитация фонового обновления ---
-    def _refresh(self) -> None:
-        self.panel.rebuild()
-        self.incoming_view.set_tickets(self.incoming)
-        self.statusBar().showMessage(
-            f"Эскиз UI · обновление списка каждые {REFRESH_INTERVAL_MS // 1000}с · сети нет"
-        )
+    def _action_error(self, exc: BaseException) -> None:
+        QMessageBox.warning(self, "Не получилось", str(exc))
+
+    def _open_after_action(self, ticket_id: str) -> None:
+        """После приёма заявки: обновить списки и открыть диалог."""
+        self._reload()
+        ticket = self.ctx.ticket(ticket_id)
+        if ticket is not None:
+            self._show_ticket(ticket)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.refresh_timer.stop()
+        self.ctx.stop()
         super().closeEvent(event)
-
-    def _find(self, ticket_id: str) -> mock.MockTicket | None:
-        return next((t for t in [*self.tickets, *self.incoming] if t.id == ticket_id), None)
-
-
-def _basename(path: str) -> str:
-    return path.replace("\\", "/").rsplit("/", 1)[-1]

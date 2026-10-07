@@ -14,8 +14,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from chat_multi_cli.models import (
+    SENDER_MASTER,
+    Attachment,
+    Message,
+    Ticket,
+)
 from chat_multi_cli.ui.composer import Composer
-from chat_multi_cli.ui.mock import MockAttachment, MockMessage, MockTicket
+from chat_multi_cli.ui.viewmodels import client_name, format_message_time
 from chat_multi_cli.ui.widgets import clear_layout
 
 DELIVERY_MARKS = {
@@ -75,10 +81,11 @@ class TicketHeader(QFrame):
 
         layout.addLayout(bottom)
 
-    def set_ticket(self, ticket: MockTicket) -> None:
+    def set_ticket(self, ticket: Ticket) -> None:
         self.subject.setText(ticket.subject)
-        self.client.setText(ticket.client_name)
-        self.workshop.setText(f"· {ticket.workshop}")
+        self.client.setText(client_name(ticket))
+        workshop = ticket.workshop_name or ""
+        self.workshop.setText(f"· {workshop}" if workshop else "")
         self.status.setText(ticket.status_label)
         closed = ticket.is_closed
         self.status.setStyleSheet("color: #b3b9c2;" if closed else "color: #2e9e5b;")
@@ -87,11 +94,11 @@ class TicketHeader(QFrame):
 class MessageBubble(QWidget):
     """Одно сообщение: текст, вложения, автор, время, статус доставки."""
 
-    def __init__(self, message: MockMessage) -> None:
+    def __init__(self, message: Message) -> None:
         super().__init__()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
-        own = message.sender == "master"
+        own = message.sender == SENDER_MASTER
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
@@ -131,7 +138,7 @@ class MessageBubble(QWidget):
             status.setObjectName("bubbleMetaRead" if message.delivery == "read" else "bubbleMeta")
             meta.addWidget(status)
 
-        time_label = QLabel(message.time)
+        time_label = QLabel(format_message_time(message.created_at))
         time_label.setObjectName("bubbleMeta")
         meta.addWidget(time_label)
         inner.addLayout(meta)
@@ -142,12 +149,16 @@ class MessageBubble(QWidget):
 
 
 class SystemBubble(QWidget):
-    def __init__(self, message: MockMessage) -> None:
+    """Центрированное уведомление. Сервер system-сообщений не шлёт, но
+    класс сохранён: если в данных встретится sender='system', он не сломает
+    диалог."""
+
+    def __init__(self, message: Message) -> None:
         super().__init__()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel(f"{message.text} · {message.time}")
+        label = QLabel(f"{message.text} · {format_message_time(message.created_at)}")
         label.setObjectName("systemBubble")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
@@ -198,68 +209,71 @@ class ChatView(QWidget):
         self.composer.back_requested.connect(self.back_requested.emit)
         layout.addWidget(self.composer)
 
-        self.ticket: MockTicket | None = None
+        self.ticket: Ticket | None = None
+        self.messages: list[Message] = []
 
-    def show_ticket(self, ticket: MockTicket) -> None:
+    def show_ticket(
+        self,
+        ticket: Ticket | None,
+        messages: list[Message] | None = None,
+        *,
+        scroll_to_bottom: bool = True,
+    ) -> None:
+        was_at_bottom = self.at_bottom()
         self.ticket = ticket
-        self.header.set_ticket(ticket)
-        self.composer.set_enabled_state(ticket.is_closed)
+        if messages is not None:
+            self.messages = list(messages)
+        if ticket is not None:
+            self.header.set_ticket(ticket)
+        self.composer.set_enabled_state(ticket.is_closed if ticket else True)
         self.redraw()
+        if scroll_to_bottom or was_at_bottom:
+            _scroll_to_bottom(self.scroll_area)
 
     def redraw(self) -> None:
         clear_layout(self.bubble_layout)
         if self.ticket is None:
             return
-        for message in self.ticket.messages:
+        for message in self.messages:
             self.bubble_layout.addWidget(self._build(message))
-        _scroll_to_bottom(self.scroll_area)
 
-    def append_message(self, message: MockMessage) -> None:
+    def append_message(self, message: Message) -> None:
         if self.ticket is None:
             return
-        self.ticket.messages.append(message)
+        self.messages.append(message)
         self.bubble_layout.addWidget(self._build(message))
         _scroll_to_bottom(self.scroll_area)
 
-    def append_local_message(self, text: str, attachment_names: list[str]) -> None:
-        self.append_message(
-            MockMessage(
-                sender="master",
-                text=text,
-                time="сейчас",
-                delivery="sending",
-                attachments=[MockAttachment(name=name, size_kb=0) for name in attachment_names],
-            )
-        )
+    def at_bottom(self) -> bool:
+        """Диалог доскроллен до низа (параметр сохранения позиции при рефреше)."""
+        bar = self.scroll_area.verticalScrollBar()
+        return bar.maximum() - bar.value() < 60
 
-    def append_system_message(self, text: str) -> None:
-        self.append_message(MockMessage(sender="system", text=text, time="сейчас"))
-
-    def _build(self, message: MockMessage) -> QWidget:
+    def _build(self, message: Message) -> QWidget:
         if message.sender == "system":
             return SystemBubble(message)
         return MessageBubble(message)
 
 
-def _attachment_tile(attachment: MockAttachment) -> QWidget:
+def _attachment_tile(attachment: Attachment) -> QWidget:
     tile = QFrame()
     tile.setObjectName("attachmentTile")
     layout = QVBoxLayout(tile)
     layout.setContentsMargins(8, 8, 8, 6)
     layout.setSpacing(2)
 
-    is_photo = attachment.name.lower().endswith(PHOTO_SUFFIXES)
+    is_photo = attachment.filename.lower().endswith(PHOTO_SUFFIXES)
     icon = QLabel("🖼" if is_photo else "📄")
     icon.setObjectName("attachmentIcon")
     layout.addWidget(icon)
 
-    caption = QLabel(attachment.name)
+    caption = QLabel(attachment.filename)
     caption.setObjectName("attachmentName")
-    caption.setToolTip(attachment.name)
+    caption.setToolTip(attachment.filename)
     layout.addWidget(caption)
 
-    if attachment.size_kb:
-        size = QLabel(f"{attachment.size_kb} КБ")
+    if attachment.size > 0:
+        size = QLabel(f"{max(1, attachment.size // 1024)} КБ")
         size.setObjectName("attachmentSize")
         layout.addWidget(size)
     return tile

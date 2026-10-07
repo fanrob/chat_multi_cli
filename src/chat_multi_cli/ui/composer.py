@@ -47,7 +47,11 @@ class ComposerInput(QTextEdit):
 
 
 class AttachmentStrip(QWidget):
-    """Превью файлов, приготовленных к отправке."""
+    """Превью файлов, приготовленных к отправке.
+
+    Хранит полные пути (их потом загружает ApiClient.upload_attachment),
+    а в чипе показывает только имя файла.
+    """
 
     remove_requested = Signal(int)
 
@@ -59,28 +63,32 @@ class AttachmentStrip(QWidget):
         layout.setContentsMargins(12, 8, 12, 0)
         layout.setSpacing(8)
         self._row = layout
-        self._names: list[str] = []
+        self._paths: list[str] = []
 
-    def set_files(self, names: list[str]) -> None:
+    def set_files(self, paths: list[str]) -> None:
         clear_layout(self._row)
-        self._names = list(names)
-        for index, name in enumerate(self._names):
-            chip = QPushButton(f"✕  {name}")
+        self._paths = list(paths)
+        for index, path in enumerate(self._paths):
+            chip = QPushButton(f"✕  {_basename(path)}")
             chip.setObjectName("attachmentChip")
-            chip.setToolTip("Убрать файл")
+            chip.setToolTip(path)
             chip.clicked.connect(lambda _=False, i=index: self._remove(i))
             self._row.addWidget(chip)
         self._row.addStretch(1)
-        self.setVisible(bool(self._names))
+        self.setVisible(bool(self._paths))
 
     @property
-    def names(self) -> list[str]:
-        return list(self._names)
+    def paths(self) -> list[str]:
+        return list(self._paths)
 
     def _remove(self, index: int) -> None:
-        if 0 <= index < len(self._names):
-            del self._names[index]
-            self.set_files(self._names)
+        if 0 <= index < len(self._paths):
+            del self._paths[index]
+            self.set_files(self._paths)
+
+
+def _basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 class Composer(QFrame):
