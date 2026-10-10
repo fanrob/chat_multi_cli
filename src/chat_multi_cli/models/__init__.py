@@ -292,6 +292,7 @@ class TicketBrief:
     subject: str
     created_at: str
     updated_at: str
+    text: str = ""
     client: ClientBrief | None = None
     workshop_id: str | None = None
     workshop_name: str | None = None
@@ -313,6 +314,7 @@ class TicketBrief:
             subject=_str(data, "subject", where),
             created_at=_str(data, "created_at", where),
             updated_at=_str(data, "updated_at", where),
+            text=_str(data, "text", where, ""),
             client=ClientBrief.from_payload(client_raw) if client_raw else None,
             workshop_id=_opt_str(data, "workshop_id"),
             workshop_name=_opt_str(data, "workshop_name"),

@@ -12,7 +12,7 @@ from functools import partial
 
 import pytest
 from PySide6.QtCore import QRect
-from PySide6.QtWidgets import QApplication, QFrame
+from PySide6.QtWidgets import QApplication, QFrame, QMessageBox
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -126,6 +126,94 @@ def test_send_appends_own_message(window: MainWindow) -> None:
     assert last.text == "Проверка связи"
 
 
+class _DeferredRunner(TaskRunner):
+    """TaskRunner, который держит действие, пока тест само его не выполнит."""
+
+    def __init__(self) -> None:
+        super().__init__(inline=True)
+        self.held: list[tuple] = []
+
+    def submit(self, fn, *, on_done=None, on_error=None):  # type: ignore[no-untyped-def]
+        self.held.append((fn, on_done, on_error))
+
+    def run_held(self) -> None:
+        while self.held:
+            fn, on_done, on_error = self.held.pop(0)
+            super().submit(fn, on_done=on_done, on_error=on_error)
+
+
+@pytest.fixture
+def deferred_window(app: QApplication, app_ctx: AppContext) -> MainWindow:
+    win = MainWindow(app_ctx, tasks=_DeferredRunner())
+    win.show()
+    app.processEvents()
+    yield win
+    win.close()
+    app.processEvents()
+
+
+def test_send_shows_message_before_server_answers(deferred_window: MainWindow) -> None:
+    window = deferred_window
+    window._open_ticket("t1")
+    count = len(window.chat.messages)
+
+    window._send("Сразу в диалоге")
+
+    visible = window.chat.visible_messages()
+    assert len(visible) == count + 1
+    assert visible[-1].text == "Сразу в диалоге"
+    assert visible[-1].delivery == "sending"
+    assert len(window.chat.pending) == 1
+
+
+def test_pending_survives_reload_until_confirmed(deferred_window: MainWindow) -> None:
+    window = deferred_window
+    window._open_ticket("t1")
+    window._send("До ответа сервера")
+    assert len(window.chat.pending) == 1
+
+    window._on_batch(None)
+    QApplication.processEvents()
+    texts = [m.text for m in window.chat.visible_messages()]
+    assert texts.count("До ответа сервера") == 1, "reload не должен дублировать или терять"
+
+    tasks = window.tasks
+    assert isinstance(tasks, _DeferredRunner)
+    tasks.run_held()
+    QApplication.processEvents()
+
+    assert window.chat.pending == []
+    texts = [m.text for m in window.chat.visible_messages()]
+    assert texts.count("До ответа сервера") == 1, "после подтверждения — одна копия"
+    assert window.chat.messages[-1].text == "До ответа сервера"
+
+
+def test_pending_removed_on_error_and_text_restored(
+    deferred_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = deferred_window
+    window._open_ticket("t1")
+    assert isinstance(window.tasks, _DeferredRunner)
+    window.tasks.held.clear()  # mark_read после открытия заявки не мешаем
+    window._send("Не уйдёт")
+    assert len(window.chat.pending) == 1
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: None)
+    tasks = window.tasks
+    assert isinstance(tasks, _DeferredRunner)
+
+    def failing():  # type: ignore[no-untyped-def]
+        raise RuntimeError("сеть лежит")
+
+    tasks.held[0] = (failing, tasks.held[0][1], tasks.held[0][2])
+    tasks.run_held()
+    QApplication.processEvents()
+
+    assert window.chat.pending == []
+    assert [m.text for m in window.chat.visible_messages()].count("Не уйдёт") == 0
+    assert window.chat.composer.input.toPlainText() == "Не уйдёт"
+
+
 def test_close_ticket_locks_composer(window: MainWindow) -> None:
     window._open_ticket("t1")
     window._close_ticket()
@@ -199,3 +287,39 @@ def test_search_filters_rows(window: MainWindow) -> None:
     window.panel.search.setText("")
     QApplication.processEvents()
     assert window.panel.list.count() == 1 + len(window.tickets)
+
+
+def test_incoming_preview_prefers_last_message_then_ticket_text() -> None:
+    """Превью входящей заявки: последнее сообщение, иначе текст самой заявки."""
+    from chat_multi_cli.models import LastMessage, TicketBrief
+    from chat_multi_cli.ui.incoming_view import _preview
+
+    fresh = TicketBrief(
+        id="t1",
+        status="new",
+        subject="Не закрывается багажник",
+        created_at="2026-02-01T10:00:00+00:00",
+        updated_at="2026-02-01T10:00:00+00:00",
+        text="После аварии багажник не закрывается",
+    )
+    assert _preview(fresh) == "После аварии багажник не закрывается"
+
+    with_reply = TicketBrief(
+        id="t1",
+        status="new",
+        subject="Не закрывается багажник",
+        created_at="2026-02-01T10:00:00+00:00",
+        updated_at="2026-02-01T10:05:00+00:00",
+        text="После аварии багажник не закрывается",
+        last_message=LastMessage(seq=2, sender="client", preview="Ещё дергается ручка"),
+    )
+    assert _preview(with_reply) == "Ещё дергается ручка"
+
+    no_text = TicketBrief(
+        id="t1",
+        status="new",
+        subject="Не закрывается багажник",
+        created_at="2026-02-01T10:00:00+00:00",
+        updated_at="2026-02-01T10:00:00+00:00",
+    )
+    assert _preview(no_text) == "Не закрывается багажник"

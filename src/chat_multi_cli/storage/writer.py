@@ -352,8 +352,8 @@ def upsert_ticket(connection: sqlite3.Connection, ticket: Ticket | TicketBrief) 
     Участников проще перезаписать, чем сравнивать: в карточке их всегда полный
     список, а состав меняется редко.
 
-    TicketBrief (список заявок) не знает текста первого сообщения и даты
-    закрытия — эти поля при обновлении не затираются.
+    TicketBrief (список заявок) не знает даты закрытия — это поле при
+    обновлении не затирается.
     """
     full = ticket if isinstance(ticket, Ticket) else None
     owner = ticket.owner
@@ -392,7 +392,7 @@ def upsert_ticket(connection: sqlite3.Connection, ticket: Ticket | TicketBrief) 
             ticket.id,
             ticket.status,
             ticket.subject,
-            full.text if full else "",
+            ticket.text,
             full.source if full else "",
             ticket.workshop_id,
             ticket.workshop_name,

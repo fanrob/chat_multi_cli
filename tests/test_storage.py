@@ -535,6 +535,46 @@ def test_messages_of_unknown_ticket_is_empty(repo: Repo) -> None:
     assert repo.unread_count("нет-такой") == 0
 
 
+def test_feed_keeps_ticket_text(writer: WriterThread, repo: Repo) -> None:
+    _write(
+        writer,
+        lambda conn: upsert_ticket(
+            conn, Ticket.from_payload(ticket_payload("t1", text="Нужен ремонт бампера"))
+        ),
+    )
+    assert repo.feed()[0].text == "Нужен ремонт бампера"
+
+
+def test_feed_derives_last_message_from_history(writer: WriterThread, repo: Repo) -> None:
+    """Сервер может не прислать last_message, хотя сообщение уже в ленте.
+
+    Тогда превью заявки собирается из локальной истории сообщений.
+    """
+    _write(
+        writer,
+        lambda conn: apply_events(
+            conn,
+            [
+                _event(
+                    1,
+                    "message.created",
+                    ticket_id="t1",
+                    data={
+                        "message": message_payload(
+                            "m-1", seq=1, ticket_id="t1", text="Уточняю детали"
+                        )
+                    },
+                ),
+                _event(2, "ticket.created", ticket_id="t1", data={"ticket": ticket_payload("t1")}),
+            ],
+        ),
+    )
+    feed = repo.feed()
+    assert len(feed) == 1
+    assert feed[0].last_message is not None
+    assert feed[0].last_message.preview == "Уточняю детали"
+
+
 def test_writer_reports_task_errors(writer: WriterThread) -> None:
     def boom(conn: sqlite3.Connection) -> None:
         raise ValueError("сломалось")

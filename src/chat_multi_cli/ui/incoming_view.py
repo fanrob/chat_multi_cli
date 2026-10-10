@@ -167,7 +167,15 @@ class IncomingView(QWidget):
 
 
 def _preview(ticket: TicketBrief) -> str:
+    """Превью заявки: последнее сообщение, иначе текст самой заявки.
+
+    Новая заявка может ещё не иметь ни одного сообщения в диалоге — тогда
+    показываем текст, с которым клиент её создал. Если же он дописал что-то,
+    не дожидаясь принятия, видно самое свежее сообщение.
+    """
     last = ticket.last_message
-    if last is None or not last.preview:
-        return "Нет сообщений"
-    return last.preview
+    if last is not None and last.preview:
+        return last.preview
+    if ticket.text.strip():
+        return ticket.text.strip()
+    return ticket.subject

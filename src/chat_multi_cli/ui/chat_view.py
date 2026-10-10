@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
@@ -33,6 +35,19 @@ DELIVERY_MARKS = {
 }
 
 PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
+@dataclass(frozen=True, slots=True)
+class PendingMessage:
+    """Оптимистичное сообщение: уже отправляется, сервер ещё не подтвердил.
+
+    baseline_seq — последний seq кэша на момент отправки: копия с сервера
+    будет новее, только по seq старше baseline её отличаем от старых
+    сообщений с таким же текстом.
+    """
+
+    message: Message
+    baseline_seq: int
 
 
 def _scroll_to_bottom(area: QScrollArea) -> None:
@@ -211,6 +226,8 @@ class ChatView(QWidget):
 
         self.ticket: Ticket | None = None
         self.messages: list[Message] = []
+        #: отправленные, но ещё не подтверждённые сервером (оптимистичный пузырь)
+        self.pending: list[PendingMessage] = []
 
     def show_ticket(
         self,
@@ -234,8 +251,75 @@ class ChatView(QWidget):
         clear_layout(self.bubble_layout)
         if self.ticket is None:
             return
-        for message in self.messages:
+        for message in self.visible_messages():
             self.bubble_layout.addWidget(self._build(message))
+
+    def visible_messages(self) -> list[Message]:
+        """Кэш диалога плюс неподтверждённые отправки.
+
+        Pending снимается, когда в кэше появилась его серверная копия: тот же
+        отправитель, тот же текст и seq новее baseline (запомненного на момент
+        отправки). Одна копия гасит один pending — так два одинаковых текста
+        подряд не исчезнут, пока подтверждено только первое.
+        """
+        shown = list(self.messages)
+        if not self.pending:
+            return shown
+        ticket_id = self.ticket.id if self.ticket else None
+        if ticket_id is None:
+            return shown
+        used: set[int] = set()
+        result = shown.copy()
+        for pending in self.pending:
+            entry = pending.message
+            if entry.ticket_id != ticket_id:
+                continue
+            echo = next(
+                (
+                    index
+                    for index, message in enumerate(shown)
+                    if index not in used
+                    and message.sender == entry.sender
+                    and message.text == entry.text
+                    and message.seq > pending.baseline_seq
+                ),
+                None,
+            )
+            if echo is None:
+                result.append(entry)
+            else:
+                used.add(echo)
+        return result
+
+    def add_pending(self, entry: Message, baseline_seq: int) -> None:
+        """Показать сообщение сразу, не дожидаясь ответа сервера."""
+        if self.ticket is None or entry.ticket_id != self.ticket.id:
+            return
+        self.pending.append(PendingMessage(message=entry, baseline_seq=baseline_seq))
+        self.redraw()
+        _scroll_to_bottom(self.scroll_area)
+
+    def take_pending(self, entry: Message, confirmed_seq: int | None = None) -> None:
+        """Снять оптимистичный пузырь (сервер подтвердил или ошибка).
+
+        confirmed_seq — seq серверной копии: baseline других pending с тем же
+        отправителем и текстом поднимается до неё, чтобы их не погасила чужая
+        копия, пока свои ещё в полёте.
+        """
+        before = len(self.pending)
+        self.pending = [item for item in self.pending if item.message.id != entry.id]
+        if confirmed_seq is not None:
+            self.pending = [
+                PendingMessage(
+                    message=item.message,
+                    baseline_seq=max(item.baseline_seq, confirmed_seq),
+                )
+                if item.message.sender == entry.sender and item.message.text == entry.text
+                else item
+                for item in self.pending
+            ]
+        if len(self.pending) != before:
+            self.redraw()
 
     def append_message(self, message: Message) -> None:
         if self.ticket is None:

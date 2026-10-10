@@ -296,6 +296,7 @@ class Repo:
                     subject=ticket.subject,
                     created_at=ticket.created_at,
                     updated_at=ticket.updated_at,
+                    text=ticket.text,
                     client=ticket.client,
                     workshop_id=ticket.workshop_id,
                     workshop_name=ticket.workshop_name,
@@ -349,6 +350,11 @@ class Repo:
                 sender=str(row["last_message_sender"] or "client"),
                 preview=str(row["last_message_preview"] or ""),
             )
+        else:
+            # Сервер может не слать last_message у только что созданной заявки,
+            # хотя сообщения в ленте уже пришли (например, это событие опередило
+            # догрузку карточки). Тогда превью собираем из локальной истории.
+            last_message = _last_message_from_history(connection, ticket_id)
 
         members = [
             Member(
@@ -381,6 +387,29 @@ class Repo:
             closed_at=row["closed_at"],
             close_reason=row["close_reason"],
         )
+
+
+def _last_message_from_history(
+    connection: sqlite3.Connection,
+    ticket_id: str,
+) -> LastMessage | None:
+    """Последнее сообщение заявки из локальной истории.
+
+    Нужно как запасной источник превью: сервер не всегда присылает
+    last_message в карточке, но история сообщений у клиента уже есть.
+    """
+    row = connection.execute(
+        "SELECT seq, sender, text FROM messages WHERE ticket_id = ? ORDER BY seq DESC LIMIT 1",
+        (ticket_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    preview = str(row["text"]).strip().replace("\n", " ")[:200]
+    return LastMessage(
+        seq=int(row["seq"]),
+        sender=str(row["sender"]),
+        preview=preview,
+    )
 
 
 def _to_message(row: sqlite3.Row) -> Message:

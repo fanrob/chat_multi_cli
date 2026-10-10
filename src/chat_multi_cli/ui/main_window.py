@@ -8,6 +8,11 @@
 
 from __future__ import annotations
 
+import mimetypes
+import uuid
+from datetime import datetime
+from pathlib import Path
+
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
@@ -20,16 +25,71 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
-from chat_multi_cli.models import Message, Ticket, TicketBrief
+from chat_multi_cli.models import (
+    DELIVERY_SENDING,
+    SENDER_MASTER,
+    Attachment,
+    Message,
+    Ticket,
+    TicketBrief,
+)
 from chat_multi_cli.services import AppContext
 from chat_multi_cli.ui import theme
-from chat_multi_cli.ui.chat_view import ChatPage, ChatView
+from chat_multi_cli.ui.chat_view import PHOTO_SUFFIXES, ChatPage, ChatView
 from chat_multi_cli.ui.incoming_view import IncomingView
 from chat_multi_cli.ui.master_picker import MasterPicker
 from chat_multi_cli.ui.tasks import SyncBridge, TaskRunner
 from chat_multi_cli.ui.ticket_list import TicketListPanel
 from chat_multi_cli.ui.viewmodels import member_pairs
 from chat_multi_cli.ui.widgets import Placeholder, StatusDot
+
+
+def _local_message(
+    ctx: AppContext,
+    ticket: Ticket,
+    text: str,
+    paths: list[str],
+    baseline_seq: int,
+) -> Message:
+    """Оптимистичное сообщение: показывается сразу, до ответа сервера.
+
+    Живёт только в памяти ChatView (в кэш не пишется): id временный,
+    seq — baseline + 1 только для порядка в списке, delivery — «отправляется».
+    Вложения показываем по локальным файлам, реальные upload-иды придут
+    с серверной копией.
+    """
+    now = datetime.now().astimezone().isoformat()
+    profile = ctx.profile
+    return Message(
+        id=f"local-{uuid.uuid4().hex}",
+        seq=baseline_seq + 1,
+        ticket_id=ticket.id,
+        sender=SENDER_MASTER,
+        sender_name=profile.full_name if profile else "",
+        text=text,
+        created_at=now,
+        attachments=tuple(_local_attachment(path, now) for path in paths),
+        sender_master_id=profile.id if profile else None,
+        delivery=DELIVERY_SENDING,
+    )
+
+
+def _local_attachment(path_str: str, created_at: str) -> Attachment:
+    path = Path(path_str)
+    mime, _ = mimetypes.guess_type(path.name)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return Attachment(
+        attachment_id=f"local-{uuid.uuid4().hex}",
+        kind="photo" if path.suffix.lower() in PHOTO_SUFFIXES else "file",
+        filename=path.name,
+        mime_type=mime or "application/octet-stream",
+        size=size,
+        source=path_str,
+        created_at=created_at,
+    )
 
 
 class MainWindow(QMainWindow):
@@ -168,14 +228,20 @@ class MainWindow(QMainWindow):
         paths = self.chat.composer.attachments.paths
         self.chat.composer.attachments.set_files([])
 
+        baseline = self.ctx.repo.last_message_seq(ticket.id)
+        entry = _local_message(self.ctx, ticket, text, paths, baseline)
+        self.chat.add_pending(entry, baseline)
+
         def action() -> Message:
             return self.ctx.send(ticket.id, text, paths)
 
         def done(message: Message) -> None:
+            self.chat.take_pending(entry, confirmed_seq=message.seq)
             self.chat.append_message(message)
             self._reload()
 
         def error(exc: BaseException) -> None:
+            self.chat.take_pending(entry)
             QMessageBox.warning(self, "Не отправлено", str(exc))
             self.chat.composer.input.setPlainText(text)
 

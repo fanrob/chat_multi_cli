@@ -497,12 +497,13 @@ def _json_body(response: httpx.Response) -> Any:
     try:
         return response.json()
     except ValueError:
-        logger.warning(
-            "%s %s: ответ не JSON (%s)",
-            response.request.method,
-            response.request.url.path,
-            response.status_code,
-        )
+        if response.status_code != 204:         #уберем из логов 204 - это нормальный ответ, засоряет логи только
+            logger.warning(
+                "%s %s: ответ не JSON (%s)",
+                response.request.method,
+                response.request.url.path,
+                response.status_code,
+            )
         return None
 
 
