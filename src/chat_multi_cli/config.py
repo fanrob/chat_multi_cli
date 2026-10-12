@@ -248,6 +248,6 @@ def setup_logging(paths: Paths, *, debug: bool = False) -> logging.Logger:
 
     # httpx на уровне INFO печатает каждый запрос и ответ: на 25-секундном
     # long-poll это шум, а при обрыве связи — десятки строк в минуту.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
     return logging.getLogger("chat_multi_cli")
