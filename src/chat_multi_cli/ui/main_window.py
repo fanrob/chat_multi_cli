@@ -35,6 +35,7 @@ from chat_multi_cli.models import (
 )
 from chat_multi_cli.services import AppContext
 from chat_multi_cli.ui import theme
+from chat_multi_cli.ui.attachments import PhotoViewer, open_in_system, write_temp_file
 from chat_multi_cli.ui.chat_view import PHOTO_SUFFIXES, ChatPage, ChatView
 from chat_multi_cli.ui.incoming_view import IncomingView
 from chat_multi_cli.ui.master_picker import MasterPicker
@@ -42,6 +43,10 @@ from chat_multi_cli.ui.tasks import SyncBridge, TaskRunner
 from chat_multi_cli.ui.ticket_list import TicketListPanel
 from chat_multi_cli.ui.viewmodels import member_pairs
 from chat_multi_cli.ui.widgets import Placeholder, StatusDot
+
+#: Префикс id локальных (ещё не подтверждённых сервером) вложений. По нему
+#: отличаем файл на диске от серверного, который надо скачивать.
+LOCAL_ID_PREFIX = "local-"
 
 
 def _local_message(
@@ -61,7 +66,7 @@ def _local_message(
     now = datetime.now().astimezone().isoformat()
     profile = ctx.profile
     return Message(
-        id=f"local-{uuid.uuid4().hex}",
+        id=f"{LOCAL_ID_PREFIX}{uuid.uuid4().hex}",
         seq=baseline_seq + 1,
         ticket_id=ticket.id,
         sender=SENDER_MASTER,
@@ -82,7 +87,7 @@ def _local_attachment(path_str: str, created_at: str) -> Attachment:
     except OSError:
         size = 0
     return Attachment(
-        attachment_id=f"local-{uuid.uuid4().hex}",
+        attachment_id=f"{LOCAL_ID_PREFIX}{uuid.uuid4().hex}",
         kind="photo" if path.suffix.lower() in PHOTO_SUFFIXES else "file",
         filename=path.name,
         mime_type=mime or "application/octet-stream",
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
         self.chat.close_requested.connect(self._close_ticket)
         self.chat.reopen_requested.connect(self._reopen_ticket)
         self.chat.attach_requested.connect(self._attach)
+        self.chat.attachment_requested.connect(self._open_attachment)
         self.chat.more_requested.connect(self._more_actions)
         self.chat.back_requested.connect(self.panel.select_incoming)
 
@@ -351,6 +357,46 @@ class MainWindow(QMainWindow):
             return
         strip = self.chat.composer.attachments
         strip.set_files(strip.paths + list(paths))
+
+    def _open_attachment(self, attachment: Attachment) -> None:
+        """Клик по плитке вложения: фото показываем, файл отдаём системе."""
+        if attachment.attachment_id.startswith(LOCAL_ID_PREFIX):
+            self._open_local_attachment(attachment)
+            return
+        self.tasks.submit(
+            lambda: self.ctx.download_attachment(attachment.attachment_id),
+            on_done=lambda data: self._show_attachment(attachment, data),
+            on_error=lambda exc: QMessageBox.warning(self, "Не открылось", str(exc)),
+        )
+
+    def _open_local_attachment(self, attachment: Attachment) -> None:
+        """Оптимистичное вложение: файл ещё на диске, скачивать нечего."""
+        path = Path(attachment.source)
+        if not path.exists():
+            QMessageBox.warning(self, "Не открылось", "Файл больше недоступен")
+            return
+        if self._is_photo(attachment):
+            PhotoViewer(self, attachment.filename, path.read_bytes()).exec()
+        else:
+            self._open_external(path)
+
+    def _show_attachment(self, attachment: Attachment, data: bytes) -> None:
+        if self._is_photo(attachment):
+            PhotoViewer(self, attachment.filename, data).exec()
+            return
+        self._open_external(write_temp_file(attachment.filename, data))
+
+    def _open_external(self, path: Path) -> None:
+        try:
+            open_in_system(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Не открылось", str(exc))
+
+    @staticmethod
+    def _is_photo(attachment: Attachment) -> bool:
+        return attachment.kind == "photo" or attachment.filename.lower().endswith(
+            PHOTO_SUFFIXES
+        )
 
     # --- прочее ---
 

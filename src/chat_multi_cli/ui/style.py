@@ -65,9 +65,15 @@ QFrame#attachmentTile {
     border: 1px solid #dfe3e8;
     border-radius: 8px;
 }
+QFrame#attachmentTile:hover {
+    background: #ffffff;
+    border-color: #2f6fed;
+}
 QLabel#attachmentIcon { font-size: 20px; }
 QLabel#attachmentName { color: #1c2128; font-size: 11px; }
 QLabel#attachmentSize { color: #9aa1ab; font-size: 10px; }
+
+QLabel#photoViewerImage { background: #f4f5f7; border-radius: 8px; }
 
 QFrame#composer, QFrame#actionBar {
     background: #ffffff;

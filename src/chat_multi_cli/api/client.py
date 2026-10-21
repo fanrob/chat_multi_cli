@@ -400,6 +400,22 @@ class ApiClient:
             return Attachment.from_payload(payload.get("attachment"))
         raise ApiError.from_payload(response.status_code, payload)
 
+    def download_attachment(self, attachment_id: str) -> bytes:
+        """Скачать файл вложения (GET /attachments/{id}) как байты.
+
+        Отдельный метод, а не _request: ответ — не JSON, а тело файла.
+        Скачивание идемпотентно, но ретраев не делаем: ошибку покажет UI,
+        а лишние попытки на 20 МБ только задержат внятное сообщение.
+        """
+        try:
+            response = self._client.get(f"/attachments/{attachment_id}")
+        except httpx.HTTPError as exc:
+            raise NetworkError(f"GET /attachments/{attachment_id}: {exc}") from exc
+
+        if response.is_success:
+            return response.content
+        raise ApiError.from_payload(response.status_code, _json_body(response))
+
     # ---------- Справочники ----------
 
     def masters(self) -> MastersPage:
@@ -497,7 +513,8 @@ def _json_body(response: httpx.Response) -> Any:
     try:
         return response.json()
     except ValueError:
-        if response.status_code != 204:         #уберем из логов 204 - это нормальный ответ, засоряет логи только
+        # 204 — нормальный ответ без тела, в логах он только шумит.
+        if response.status_code != 204:
             logger.warning(
                 "%s %s: ответ не JSON (%s)",
                 response.request.method,

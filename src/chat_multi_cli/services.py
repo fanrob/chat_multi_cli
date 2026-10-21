@@ -264,6 +264,10 @@ class AppContext:
         self.writer.run_sync(partial(upsert_message, message=message))
         return message
 
+    def download_attachment(self, attachment_id: str) -> bytes:
+        """Скачать файл вложения (в том числе фото клиента) с сервера."""
+        return self.client.download_attachment(attachment_id)
+
     def mark_read(self, ticket_id: str) -> None:
         """Прочитать всё до последнего seq: серверу и в локальный кэш."""
         seq = self.repo.last_message_seq(ticket_id)

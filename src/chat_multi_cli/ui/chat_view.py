@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from chat_multi_cli.models import (
+    SENDER_CLIENT,
     SENDER_MASTER,
     Attachment,
     Message,
@@ -106,8 +108,52 @@ class TicketHeader(QFrame):
         self.status.setStyleSheet("color: #b3b9c2;" if closed else "color: #2e9e5b;")
 
 
+class AttachmentTile(QFrame):
+    """Плитка вложения; по клику просит открыть файл.
+
+    Сигнал несёт сам Attachment, а не только id: для оптимистичных сообщений
+    вложение ещё локальное (файл на диске), для серверных — скачивается по id,
+    и решать это должен обработчик, а не плитка.
+    """
+
+    activated = Signal(object)
+
+    def __init__(self, attachment: Attachment) -> None:
+        super().__init__()
+        self.attachment = attachment
+        self.setObjectName("attachmentTile")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"{attachment.filename} — открыть")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setSpacing(2)
+
+        is_photo = attachment.filename.lower().endswith(PHOTO_SUFFIXES)
+        icon = QLabel("🖼" if is_photo else "📄")
+        icon.setObjectName("attachmentIcon")
+        layout.addWidget(icon)
+
+        caption = QLabel(attachment.filename)
+        caption.setObjectName("attachmentName")
+        caption.setToolTip(attachment.filename)
+        layout.addWidget(caption)
+
+        if attachment.size > 0:
+            size = QLabel(f"{max(1, attachment.size // 1024)} КБ")
+            size.setObjectName("attachmentSize")
+            layout.addWidget(size)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self.attachment)
+        super().mousePressEvent(event)
+
+
 class MessageBubble(QWidget):
     """Одно сообщение: текст, вложения, автор, время, статус доставки."""
+
+    attachment_activated = Signal(object)
 
     def __init__(self, message: Message) -> None:
         super().__init__()
@@ -134,7 +180,9 @@ class MessageBubble(QWidget):
         inner.addWidget(text)
 
         for attachment in message.attachments:
-            inner.addWidget(_attachment_tile(attachment))
+            tile = AttachmentTile(attachment)
+            tile.activated.connect(self.attachment_activated.emit)
+            inner.addWidget(tile)
 
         meta = QHBoxLayout()
         meta.setContentsMargins(0, 0, 0, 0)
@@ -185,6 +233,7 @@ class ChatView(QWidget):
 
     send_requested = Signal(str)
     attach_requested = Signal()
+    attachment_requested = Signal(object)
     close_requested = Signal()
     reopen_requested = Signal()
     add_master_requested = Signal()
@@ -255,7 +304,11 @@ class ChatView(QWidget):
             self.bubble_layout.addWidget(self._build(message))
 
     def visible_messages(self) -> list[Message]:
-        """Кэш диалога плюс неподтверждённые отправки.
+        """Кэш диалога плюс вводное сообщение и неподтверждённые отправки.
+
+        Вводное сообщение — текст клиента, создавший заявку: сервер держит его
+        в карточке (ticket.text), а не в переписке, поэтому здесь он становится
+        первым пузырём.
 
         Pending снимается, когда в кэше появилась его серверная копия: тот же
         отправитель, тот же текст и seq новее baseline (запомненного на момент
@@ -263,33 +316,59 @@ class ChatView(QWidget):
         подряд не исчезнут, пока подтверждено только первое.
         """
         shown = list(self.messages)
-        if not self.pending:
-            return shown
-        ticket_id = self.ticket.id if self.ticket else None
-        if ticket_id is None:
-            return shown
-        used: set[int] = set()
         result = shown.copy()
-        for pending in self.pending:
-            entry = pending.message
-            if entry.ticket_id != ticket_id:
-                continue
-            echo = next(
-                (
-                    index
-                    for index, message in enumerate(shown)
-                    if index not in used
-                    and message.sender == entry.sender
-                    and message.text == entry.text
-                    and message.seq > pending.baseline_seq
-                ),
-                None,
-            )
-            if echo is None:
-                result.append(entry)
-            else:
-                used.add(echo)
+        ticket_id = self.ticket.id if self.ticket else None
+
+        if self.pending and ticket_id is not None:
+            used: set[int] = set()
+            for pending in self.pending:
+                entry = pending.message
+                if entry.ticket_id != ticket_id:
+                    continue
+                echo = next(
+                    (
+                        index
+                        for index, message in enumerate(shown)
+                        if index not in used
+                        and message.sender == entry.sender
+                        and message.text == entry.text
+                        and message.seq > pending.baseline_seq
+                    ),
+                    None,
+                )
+                if echo is None:
+                    result.append(entry)
+                else:
+                    used.add(echo)
+
+        intro = self._intro_message()
+        if intro is not None:
+            result.insert(0, intro)
         return result
+
+    def _intro_message(self) -> Message | None:
+        """Первое сообщение клиента, создавшее заявку.
+
+        Сервер отдаёт его в карточке (ticket.text), но не в переписке —
+        поэтому без этого пузыря текст заявки в диалоге вообще не виден.
+        Показываем только если такого текста ещё нет среди сообщений, чтобы
+        серверная копия первого сообщения не задвоилась.
+        """
+        ticket = self.ticket
+        if ticket is None or not ticket.text.strip():
+            return None
+        if any(message.text == ticket.text for message in self.messages):
+            return None
+        return Message(
+            id=f"ticket-intro-{ticket.id}",
+            seq=0,
+            ticket_id=ticket.id,
+            sender=SENDER_CLIENT,
+            sender_name=ticket.client.display_name if ticket.client else "",
+            text=ticket.text,
+            created_at=ticket.created_at,
+            delivery="delivered",
+        )
 
     def add_pending(self, entry: Message, baseline_seq: int) -> None:
         """Показать сообщение сразу, не дожидаясь ответа сервера."""
@@ -336,31 +415,9 @@ class ChatView(QWidget):
     def _build(self, message: Message) -> QWidget:
         if message.sender == "system":
             return SystemBubble(message)
-        return MessageBubble(message)
-
-
-def _attachment_tile(attachment: Attachment) -> QWidget:
-    tile = QFrame()
-    tile.setObjectName("attachmentTile")
-    layout = QVBoxLayout(tile)
-    layout.setContentsMargins(8, 8, 8, 6)
-    layout.setSpacing(2)
-
-    is_photo = attachment.filename.lower().endswith(PHOTO_SUFFIXES)
-    icon = QLabel("🖼" if is_photo else "📄")
-    icon.setObjectName("attachmentIcon")
-    layout.addWidget(icon)
-
-    caption = QLabel(attachment.filename)
-    caption.setObjectName("attachmentName")
-    caption.setToolTip(attachment.filename)
-    layout.addWidget(caption)
-
-    if attachment.size > 0:
-        size = QLabel(f"{max(1, attachment.size // 1024)} КБ")
-        size.setObjectName("attachmentSize")
-        layout.addWidget(size)
-    return tile
+        bubble = MessageBubble(message)
+        bubble.attachment_activated.connect(self.attachment_requested.emit)
+        return bubble
 
 
 class MembersPanel(QFrame):

@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import os
 from functools import partial
+from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFrame, QMessageBox
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from chat_multi_cli.models import Message
+import chat_multi_cli.ui.main_window as main_window
+from chat_multi_cli.models import Attachment, Message
 from chat_multi_cli.services import AppContext
 from chat_multi_cli.storage.writer import upsert_message
-from chat_multi_cli.ui.chat_view import MessageBubble, SystemBubble
+from chat_multi_cli.ui.chat_view import AttachmentTile, MessageBubble, SystemBubble
 from chat_multi_cli.ui.main_window import MainWindow
 from chat_multi_cli.ui.style import QSS
 from chat_multi_cli.ui.tasks import TaskRunner
@@ -155,7 +158,7 @@ def deferred_window(app: QApplication, app_ctx: AppContext) -> MainWindow:
 def test_send_shows_message_before_server_answers(deferred_window: MainWindow) -> None:
     window = deferred_window
     window._open_ticket("t1")
-    count = len(window.chat.messages)
+    count = len(window.chat.visible_messages())
 
     window._send("Сразу в диалоге")
 
@@ -253,6 +256,21 @@ def test_reload_keeps_chat_open(window: MainWindow) -> None:
     assert window.chat.ticket.id == "t1"
 
 
+def test_ticket_text_shown_as_first_dialog_message(window: MainWindow) -> None:
+    """Текст клиента, создавший заявку, виден первым пузырём диалога."""
+    window._open_ticket("t1")
+    visible = window.chat.visible_messages()
+    assert visible[0].text == window.chat.ticket.text
+    assert visible[0].sender == "client"
+
+
+def test_ticket_text_not_duplicated_when_already_a_message(window: MainWindow) -> None:
+    """Если переписка уже начинается с текста заявки, вводный пузырь не нужен."""
+    window._open_ticket("t2")
+    visible = window.chat.visible_messages()
+    assert [message.text for message in visible].count(window.chat.ticket.text) == 1
+
+
 def test_incoming_message_appears_after_reload(
     window: MainWindow, fake_server: FakeServer
 ) -> None:
@@ -323,3 +341,86 @@ def test_incoming_preview_prefers_last_message_then_ticket_text() -> None:
         updated_at="2026-02-01T10:00:00+00:00",
     )
     assert _preview(no_text) == "Не закрывается багажник"
+
+
+def _tile_for_kind(window: MainWindow, kind: str) -> AttachmentTile:
+    window._open_ticket("t1")
+    QApplication.processEvents()
+    for tile in window.chat.findChildren(AttachmentTile):
+        if tile.attachment.kind == kind:
+            return tile
+    raise AssertionError(f"в диалоге нет вложения kind={kind}")
+
+
+def test_attachment_tile_click_asks_to_open(window: MainWindow) -> None:
+    tile = _tile_for_kind(window, "photo")
+    requested: list[Attachment] = []
+    window.chat.attachment_requested.disconnect()
+    window.chat.attachment_requested.connect(requested.append)
+
+    QTest.mouseClick(tile, Qt.MouseButton.LeftButton)
+
+    assert requested == [tile.attachment]
+
+
+def test_photo_attachment_opens_in_app_viewer(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tile = _tile_for_kind(window, "photo")
+    shown: dict[str, object] = {}
+
+    class FakeViewer:
+        def __init__(self, parent: object, filename: str, data: bytes) -> None:
+            shown["filename"] = filename
+            shown["data"] = data
+
+        def exec(self) -> None:
+            shown["exec"] = True
+
+    monkeypatch.setattr(main_window, "PhotoViewer", FakeViewer)
+    monkeypatch.setattr(window.ctx, "download_attachment", lambda _aid: b"photo-bytes")
+
+    window._open_attachment(tile.attachment)
+
+    assert shown == {"filename": "photo.jpg", "data": b"photo-bytes", "exec": True}
+
+
+def test_file_attachment_opens_in_system(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tile = _tile_for_kind(window, "file")
+    opened: list[Path] = []
+    monkeypatch.setattr(main_window, "open_in_system", lambda path: opened.append(path))
+    monkeypatch.setattr(window.ctx, "download_attachment", lambda _aid: b"%PDF-1.4")
+
+    window._open_attachment(tile.attachment)
+
+    assert len(opened) == 1
+    assert opened[0].read_bytes() == b"%PDF-1.4"
+
+
+def test_local_attachment_skips_download(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    opened: list[Path] = []
+    monkeypatch.setattr(main_window, "open_in_system", lambda path: opened.append(path))
+    monkeypatch.setattr(
+        window.ctx,
+        "download_attachment",
+        lambda _aid: (_ for _ in ()).throw(AssertionError("локальный файл качать не надо")),
+    )
+    doc = tmp_path / "note.txt"
+    doc.write_bytes(b"local-file")
+    attachment = Attachment(
+        attachment_id="local-1",
+        kind="file",
+        filename="note.txt",
+        mime_type="text/plain",
+        size=8,
+        source=str(doc),
+        created_at="",
+    )
+
+    window._open_attachment(attachment)
+
+    assert opened == [doc]

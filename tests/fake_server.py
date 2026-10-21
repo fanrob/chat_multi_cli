@@ -44,6 +44,7 @@ class FakeServer:
         self.workshops: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.uploaded: dict[str, dict[str, Any]] = {}
+        self.blobs: dict[str, bytes] = {}
         self.seq_by_ticket: dict[str, int] = {}
         self._msg_id = 0
         self._att_id = 0
@@ -70,6 +71,31 @@ class FakeServer:
                 "preview": str(entry["text"]),
             }
             ticket["updated_at"] = str(entry["created_at"])
+
+    def add_attachment(
+        self,
+        *,
+        attachment_id: str,
+        filename: str,
+        mime_type: str,
+        data: bytes,
+        source: str = "client",
+    ) -> dict[str, Any]:
+        """Кладёт вложение в хранилище сервера и возвращает его метаданные."""
+        meta: dict[str, Any] = {
+            "attachment_id": attachment_id,
+            "kind": "photo" if mime_type.startswith("image/") else "file",
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": len(data),
+            "source": source,
+            "created_at": "2026-02-01T12:00:00+00:00",
+            "width": None,
+            "height": None,
+        }
+        self.uploaded[attachment_id] = meta
+        self.blobs[attachment_id] = data
+        return meta
 
     def post_event(self, event: dict[str, Any]) -> None:
         """Событие ленты для GET /sync (используется тестами с start_sync())."""
@@ -133,6 +159,13 @@ class FakeServer:
                     return self._add_member(ticket_id, request)
                 if method == "DELETE" and len(rest) == 2 and rest[0] == "members":
                     return self._remove_member(ticket_id, rest[1])
+
+            if len(parts) >= 3 and parts[1] == "attachments" and parts[2]:
+                attachment_id = parts[2]
+                if method == "GET" and len(parts) == 3:
+                    return self._download_attachment(attachment_id)
+                if method == "GET" and parts[3:] == ["meta"]:
+                    return self._attachment_meta(attachment_id)
 
             return self._json(404, _error("not_found", f"{method} {path} не поддерживается"))
 
@@ -333,7 +366,35 @@ class FakeServer:
             "height": None,
         }
         self.uploaded[attachment_id] = attachment
+        self.blobs[attachment_id] = content
         return self._json(200, {"attachment": attachment})
+
+    def _download_attachment(self, attachment_id: str) -> httpx.Response:
+        meta = self.uploaded.get(attachment_id)
+        data = self.blobs.get(attachment_id)
+        if meta is None or data is None:
+            return self._json(404, _error("attachment_not_found", "Вложение не найдено"))
+        return httpx.Response(
+            200,
+            content=data,
+            headers={"Content-Type": str(meta["mime_type"])},
+        )
+
+    def _attachment_meta(self, attachment_id: str) -> httpx.Response:
+        meta = self.uploaded.get(attachment_id)
+        if meta is None:
+            return self._json(404, _error("attachment_not_found", "Вложение не найдено"))
+        return self._json(
+            200,
+            {
+                "attachment_id": attachment_id,
+                "filename": meta["filename"],
+                "mime_type": meta["mime_type"],
+                "size": meta["size"],
+                "source": meta["source"],
+                "created_at": meta["created_at"],
+            },
+        )
 
     # ---------- Участники ----------
 
@@ -408,12 +469,30 @@ def seeded_server() -> FakeServer:
         "t1",
         message_payload("m-1", seq=1, ticket_id="t1", sender="client", text="Стук появился вчера"),
     )
+    server.messages["t1"][0]["attachments"] = [
+        server.add_attachment(
+            attachment_id="att-t1-photo",
+            filename="photo.jpg",
+            mime_type="image/jpeg",
+            data=b"\xff\xd8\xff\xe0client-photo",
+            source="client",
+        )
+    ]
     server.add_message(
         "t1",
         message_payload(
             "m-2", seq=2, ticket_id="t1", sender="master", text="Принял, подъеду вечером"
         ),
     )
+    server.messages["t1"][1]["attachments"] = [
+        server.add_attachment(
+            attachment_id="att-t1-file",
+            filename="act.pdf",
+            mime_type="application/pdf",
+            data=b"%PDF-1.4 master-file",
+            source="master",
+        )
+    ]
     server.add_message(
         "t1",
         message_payload(

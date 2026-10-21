@@ -37,6 +37,11 @@ class TaskRunner(QObject):
     ) -> None:
         super().__init__(parent)
         self._inline = inline
+        # Сигналы эмитятся из фонового потока, но доставляются сюда очередью
+        # событий UI-потока: так on_done/on_error гарантированно вызываются в
+        # потоке окна и могут трогать виджеты.
+        self.succeeded.connect(self._deliver_success)
+        self.failed.connect(self._deliver_error)
 
     @property
     def inline(self) -> bool:
@@ -77,6 +82,19 @@ class TaskRunner(QObject):
             self.failed.emit(on_error, exc)
         else:
             self.succeeded.emit(on_done, result)
+
+    def _deliver_success(self, on_done: Callable[[Any], Any] | None, result: Any) -> None:
+        """Слот сигнала succeeded: выполняется в UI-потоке."""
+        if on_done is not None:
+            on_done(result)
+
+    def _deliver_error(
+        self, on_error: Callable[[BaseException], Any] | None, exc: BaseException
+    ) -> None:
+        """Слот сигнала failed: выполняется в UI-потоке."""
+        logger.debug("Действие не удалось: %s", exc)
+        if on_error is not None:
+            on_error(exc)
 
     def _run(
         self,

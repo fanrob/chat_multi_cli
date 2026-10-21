@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from chat_multi_cli.api.errors import ApiError
 from chat_multi_cli.config import ConfigStore, Paths
 from chat_multi_cli.services import AppContext, SetupRequired
 from tests.conftest import BASE_URL
@@ -105,6 +106,21 @@ def test_members(app_ctx: AppContext) -> None:
     assert "Пётр Кузнецов" in {member.full_name for member in ticket.members}
     ticket = app_ctx.remove_member("t1", "m2")
     assert ticket.members == ()
+
+
+def test_download_attachment(app_ctx: AppContext, fake_server: FakeServer) -> None:
+    fake_server.add_attachment(
+        attachment_id="att-x",
+        filename="pic.png",
+        mime_type="image/png",
+        data=b"\x89PNGdata",
+    )
+    assert app_ctx.download_attachment("att-x") == b"\x89PNGdata"
+
+
+def test_download_missing_attachment_raises(app_ctx: AppContext) -> None:
+    with pytest.raises(ApiError):
+        app_ctx.download_attachment("no-such-attachment")
 
 
 def test_update_profile_saves_config(app_ctx: AppContext) -> None:
