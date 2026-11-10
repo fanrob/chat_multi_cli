@@ -444,6 +444,29 @@ def test_mine_filters_by_owner(writer: WriterThread, repo: Repo) -> None:
     assert [t.id for t in repo.mine()] == ["t1"]
 
 
+def test_closed_mine_filters_by_owner(writer: WriterThread, repo: Repo) -> None:
+    """Закрытые чужие заявки не должны попадать в «мои» (панель слева)."""
+    _write(
+        writer,
+        lambda conn: upsert_ticket(
+            conn, Ticket.from_payload(ticket_payload("t1", status="closed"))
+        ),
+    )
+    _write(
+        writer,
+        lambda conn: upsert_ticket(
+            conn,
+            Ticket.from_payload(
+                ticket_payload("t2", status="closed", owner=master_payload("m2"))
+            ),
+        ),
+    )
+    repo.my_id = "m1"
+    assert [t.id for t in repo.closed_mine()] == ["t1"]
+    repo.my_id = "m2"
+    assert [t.id for t in repo.closed_mine()] == ["t2"]
+
+
 def test_unread_count_and_total(writer: WriterThread, repo: Repo) -> None:
     _write(writer, lambda conn: upsert_ticket(conn, Ticket.from_payload(ticket_payload())))
     _write(

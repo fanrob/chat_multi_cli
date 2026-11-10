@@ -53,6 +53,13 @@ _UNREAD_EXPR: Final = """
       WHERE m.ticket_id = t.id AND m.sender = 'client' AND m.seq > t.read_seq)
 """
 
+#: «Моя заявка» — я владелец либо внесён в участники. Параметры: my_id, my_id.
+_MINE_CLAUSE: Final = """
+    (t.owner_id = ?
+     OR EXISTS (SELECT 1 FROM ticket_members tm
+                WHERE tm.ticket_id = t.id AND tm.master_id = ?))
+"""
+
 
 class Repo:
     """Чтение локального кэша."""
@@ -91,13 +98,26 @@ class Repo:
             f"""
             SELECT {_TICKET_COLUMNS}
             FROM tickets t
-            WHERE t.owner_id = ?
-               OR EXISTS (SELECT 1 FROM ticket_members tm
-                          WHERE tm.ticket_id = t.id AND tm.master_id = ?)
+            WHERE {_MINE_CLAUSE}
             ORDER BY CASE t.status WHEN 'in_progress' THEN 0 ELSE 1 END, t.updated_at DESC
             LIMIT ?
             """,
             (self.my_id, self.my_id, limit),
+        ).fetchall()
+        return self._to_briefs(connection, rows)
+
+    def closed_mine(self, *, limit: int = DEFAULT_TICKETS_LIMIT) -> list[TicketBrief]:
+        """Закрытые мои заявки: где я владелец или участник."""
+        connection = self._connection
+        rows = connection.execute(
+            f"""
+            SELECT {_TICKET_COLUMNS}
+            FROM tickets t
+            WHERE t.status = ? AND {_MINE_CLAUSE}
+            ORDER BY t.updated_at DESC
+            LIMIT ?
+            """,
+            (STATUS_CLOSED, self.my_id, self.my_id, limit),
         ).fetchall()
         return self._to_briefs(connection, rows)
 

@@ -195,9 +195,13 @@ class AppContext:
         return self.repo.feed()
 
     def panel_tickets(self) -> list[TicketBrief]:
-        """Заявки для панели слева: мои плюс закрытые."""
+        """Заявки для панели слева: только мои — открытые и закрытые.
+
+        «Мои» = я владелец или участник (repo.mine / repo.closed_mine):
+        чужие закрытые заявки в панели не показываем.
+        """
         merged: dict[str, TicketBrief] = {item.id: item for item in self.repo.mine()}
-        for item in self.repo.closed():
+        for item in self.repo.closed_mine():
             merged.setdefault(item.id, item)
         return list(merged.values())
 

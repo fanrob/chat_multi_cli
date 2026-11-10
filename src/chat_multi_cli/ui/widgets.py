@@ -8,13 +8,19 @@ from PySide6.QtWidgets import QLabel, QLayout, QVBoxLayout, QWidget
 
 
 def clear_layout(layout: QLayout) -> None:
-    """Убирает все элементы layout, удаляя виджеты."""
+    """Убирает все элементы layout, удаляя виджеты.
+
+    Перед отцепкой виджет гасим: на Windows setParent(None) у видимого
+    виджета превращает его в top-level окно, которое успевает мигнуть,
+    пока deleteLater его не уничтожит (пересылка чата при отправке).
+    """
     while layout.count():
         item = layout.takeAt(0)
         if item is None:
             continue
         widget = item.widget()
         if widget is not None:
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
 

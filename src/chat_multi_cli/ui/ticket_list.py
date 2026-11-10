@@ -135,36 +135,48 @@ class TicketDelegate(QStyledItemDelegate):
 
         painter.setFont(_font(10, bold=not muted))
         painter.setPen(title_color)
-        subject_rect = rect.adjusted(24, 10, -70, 0)
+        subject_rect = rect.adjusted(24, 8, -80, 0)
         painter.drawText(
             subject_rect,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
             _elide(painter, subject_rect, ticket.subject),
         )
 
+        painter.setFont(_font(9, bold=True))
+        painter.setPen(theme.TEXT_DISABLED if muted else theme.TEXT_MUTED)
+        number_rect = rect.adjusted(-76, 10, -12, 0)
+        painter.drawText(
+            number_rect,
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop),
+            f"№{ticket.id}",
+        )
+
+        preview = _first_message_preview(ticket)
+        if preview:
+            painter.setFont(_font(9))
+            painter.setPen(meta_color)
+            preview_rect = rect.adjusted(24, 26, -24, -24)
+            painter.drawText(
+                preview_rect,
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                _elide(painter, preview_rect, preview),
+            )
+
         time = format_time(ticket.updated_at)
         painter.setFont(_font(9))
         painter.setPen(meta_color)
-        meta_rect = rect.adjusted(24, 0, -70, -28)
+        meta_rect = rect.adjusted(24, 0, -70, -10)
         painter.drawText(
             meta_rect,
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom),
             _elide(painter, meta_rect, f"{client_name(ticket)} · {time}"),
         )
 
-        painter.setFont(_font(9, bold=True))
-        painter.setPen(theme.TEXT_DISABLED if muted else theme.TEXT_MUTED)
-        painter.drawText(
-            rect.adjusted(-64, 10, -12, 0),
-            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop),
-            time,
-        )
-
         if muted:
             painter.setFont(_font(8))
             painter.setPen(theme.TEXT_DISABLED)
             painter.drawText(
-                rect.adjusted(-64, 0, -12, -30),
+                rect.adjusted(-64, 0, -12, -12),
                 int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom),
                 "закрыта",
             )
@@ -173,6 +185,12 @@ class TicketDelegate(QStyledItemDelegate):
 def _badge_rect(rect: QRect, count: int) -> QRect:
     size = max(22, 14 + 8 * len(str(count)))
     return QRect(rect.right() - size - 14, rect.top() + 12, size, 22)
+
+
+def _first_message_preview(ticket: TicketBrief) -> str:
+    """Начало первого сообщения заявки в одну строку."""
+    text = " ".join(ticket.text.split())
+    return text
 
 
 def _is_selected(option: QStyleOptionViewItem) -> bool:
@@ -265,7 +283,7 @@ class TicketListPanel(QWidget):
         for ticket in ordered:
             item = QListWidgetItem()
             item.setData(TICKET_ROLE, ticket)
-            item.setToolTip(f"{ticket.subject}\n{client_name(ticket)}")
+            item.setToolTip(f"№{ticket.id} · {ticket.subject}\n{client_name(ticket)}")
             self.list.addItem(item)
 
         self.list.blockSignals(False)
@@ -294,6 +312,7 @@ class TicketListPanel(QWidget):
                 t
                 for t in pool
                 if query in t.subject.casefold()
+                or query in t.text.casefold()
                 or query in client_name(t).casefold()
                 or query in t.id.casefold()
             ]
