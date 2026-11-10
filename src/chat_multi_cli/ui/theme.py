@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 
 BG = QColor("#f4f5f7")
 SIDEBAR_BG = QColor("#ffffff")
@@ -32,3 +32,37 @@ TICKET_NEW_BORDER = QColor("#dfe3e8")
 ROW_HEIGHT = 68
 INCOMING_ROW_HEIGHT = 76
 PANEL_WIDTH = 340
+
+
+def light_palette() -> QPalette:
+    """Светлая палитра: тёмная тема ОС не должна делать текст белым на белом."""
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, BG)
+    palette.setColor(QPalette.ColorRole.WindowText, TEXT)
+    palette.setColor(QPalette.ColorRole.Base, WHITE)
+    palette.setColor(QPalette.ColorRole.AlternateBase, CARD_BG)
+    palette.setColor(QPalette.ColorRole.Text, TEXT)
+    palette.setColor(QPalette.ColorRole.Button, WHITE)
+    palette.setColor(QPalette.ColorRole.ButtonText, TEXT)
+    palette.setColor(QPalette.ColorRole.BrightText, WHITE)
+    palette.setColor(QPalette.ColorRole.Link, ACCENT)
+    palette.setColor(QPalette.ColorRole.LinkVisited, ACCENT_HOVER)
+    palette.setColor(QPalette.ColorRole.Highlight, ACCENT)
+    palette.setColor(QPalette.ColorRole.HighlightedText, WHITE)
+    palette.setColor(QPalette.ColorRole.Accent, ACCENT)
+    palette.setColor(QPalette.ColorRole.ToolTipBase, WHITE)
+    palette.setColor(QPalette.ColorRole.ToolTipText, TEXT)
+    palette.setColor(QPalette.ColorRole.PlaceholderText, TEXT_MUTED)
+    palette.setColor(QPalette.ColorRole.Light, WHITE)
+    palette.setColor(QPalette.ColorRole.Midlight, BORDER)
+    palette.setColor(QPalette.ColorRole.Dark, TEXT_DISABLED)
+    palette.setColor(QPalette.ColorRole.Mid, TEXT_MUTED)
+    palette.setColor(QPalette.ColorRole.Shadow, QColor("#000000"))
+
+    disabled = QPalette.ColorGroup.Disabled
+    palette.setColor(disabled, QPalette.ColorRole.Text, TEXT_DISABLED)
+    palette.setColor(disabled, QPalette.ColorRole.WindowText, TEXT_DISABLED)
+    palette.setColor(disabled, QPalette.ColorRole.ButtonText, TEXT_DISABLED)
+    palette.setColor(disabled, QPalette.ColorRole.Highlight, ACCENT_SOFT)
+    palette.setColor(disabled, QPalette.ColorRole.HighlightedText, TEXT_MUTED)
+    return palette
