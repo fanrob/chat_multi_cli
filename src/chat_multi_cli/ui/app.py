@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,6 +24,7 @@ from chat_multi_cli.services import AppContext, SetupRequired
 from chat_multi_cli.ui.main_window import MainWindow
 from chat_multi_cli.ui.setup_dialog import SetupDialog
 from chat_multi_cli.ui.style import QSS
+from chat_multi_cli.ui.theme import light_palette
 
 
 def run() -> int:
@@ -30,6 +32,12 @@ def run() -> int:
     app.setApplicationName("chat_multi_cli")
     app.setOrganizationName("STO")
     app.setStyle("Fusion")
+    # Тема светлая всегда: тёмная тема ОС иначе даёт белый текст на белых
+    # полях ввода (палитра тёмная, а фон задан стилями светлый).
+    hints = app.styleHints()
+    if hasattr(hints, "setColorScheme"):  # задаток есть с PySide6 6.8
+        hints.setColorScheme(Qt.ColorScheme.Light)
+    app.setPalette(light_palette())
     app.setStyleSheet(QSS)
 
     paths = Paths.for_user().ensure()
